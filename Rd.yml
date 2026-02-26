@@ -1,0 +1,100 @@
+version: 2.1
+
+jobs:
+  rdp:
+    machine:
+      image: windows-server-2022-gui
+    steps:
+      - checkout
+      - run:
+          name: Enable RDP
+          command: |
+            Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+            Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+
+      - run:
+          name: Open Firewall Port
+          command: |
+            netsh advfirewall firewall delete rule name="RDP-Tailscale"
+            netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+
+      - run:
+          name: Restart RDP Service
+          command: Restart-Service -Name TermService -Force
+
+      - run:
+          name: Create RDP User
+          command: |
+            $password = "Shdwrdp1610!"
+            net user shdwrdp $password /add /expires:never /passwordchg:no
+            net localgroup Administrators shdwrdp /add
+            net localgroup "Remote Desktop Users" shdwrdp /add
+            Write-Host "User created with password: $password"
+
+      - run:
+          name: Install Tailscale
+          command: |
+            $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+            $installerPath = "$env:TEMP\tailscale.msi"
+            Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+            Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+            Remove-Item $installerPath -Force
+
+      - run:
+          name: Connect Tailscale
+          command: |
+            # REPLACE THIS WITH YOUR ACTUAL TAILSCALE KEY
+            $tsKey = "tskey-auth-kCfbbTe3yA21CNTRL-2tWHX8pTZbcLGqNNwxpzbcQZAsJhxY8z"
+            
+            & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$tsKey --hostname=circleci-rdp
+            
+            $tsIP = $null
+            $retries = 0
+            while (-not $tsIP -and $retries -lt 10) {
+                $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+                Start-Sleep -Seconds 5
+                $retries++
+            }
+            
+            # Save info to file
+            $infoPath = "C:\Users\Public\rdp_info.txt"
+            "=================================" | Out-File $infoPath
+            "CIRCLECI RDP ACCESS INFO" | Out-File $infoPath -Append
+            "=================================" | Out-File $infoPath -Append
+            "IP Address: $tsIP" | Out-File $infoPath -Append
+            "Username: shdwrdp" | Out-File $infoPath -Append
+            "Password: Shdwrdp1610!" | Out-File $infoPath -Append
+            "=================================" | Out-File $infoPath -Append
+            "This machine runs for 3 days" | Out-File $infoPath -Append
+            "=================================" | Out-File $infoPath -Append
+            
+            Write-Host "`n================================="
+            Write-Host "RDP READY - 3 DAYS (259200 SECONDS)"
+            Write-Host "================================="
+            Write-Host "IP: $tsIP"
+            Write-Host "User: shdwrdp"
+            Write-Host "Pass: Shdwrdp1610!"
+            Write-Host "================================="
+            Write-Host "Info saved to: C:\Users\Public\rdp_info.txt"
+            Write-Host "=================================`n"
+            
+            # Set environment variable for later steps
+            echo "export TAILSCALE_IP=$tsIP" >> $env:BASH_ENV
+
+      - run:
+          name: Keep Alive for 3 Days
+          command: |
+            $endTime = (Get-Date).AddDays(3)
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            
+            while ((Get-Date) -lt $endTime) {
+                $remaining = $endTime - (Get-Date)
+                Write-Host "[$(Get-Date)] Active - Days: $($remaining.Days) | Hours: $($remaining.Hours) | Minutes: $($remaining.Minutes) | IP: $tsIP"
+                Start-Sleep -Seconds 300
+            }
+
+workflows:
+  version: 2
+  rdp-workflow:
+    jobs:
+      - rdp
